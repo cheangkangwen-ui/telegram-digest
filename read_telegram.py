@@ -1,8 +1,8 @@
 import os
 import time
+import asyncio
 import anthropic
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from telethon.sync import TelegramClient
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel
 from datetime import datetime, timezone, timedelta
@@ -10,10 +10,10 @@ from datetime import datetime, timezone, timedelta
 TELEGRAM_API_ID = 33919151
 TELEGRAM_API_HASH = "dd0a935bd6545cf56910292ff4445c4e"
 TELEGRAM_SESSION = os.environ.get("TELEGRAM_SESSION", "my_session")
-
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
-MAX_WORKERS = 20  # parallel channel analyses
+TG_SEMAPHORE = 10   # max concurrent Telegram fetches
+API_SEMAPHORE = 20  # max concurrent Anthropic calls
 
 
 def get_time_window():
@@ -34,23 +34,56 @@ def get_time_window():
     return start.astimezone(timezone.utc), label
 
 
-def is_financial_channel(client_ai, channel_name, sample_text):
-    prompt = f"""Channel name: "{channel_name}"
+async def fetch_channel_messages(tg, dialog, start_utc, now_utc, sem):
+    async with sem:
+        messages = []
+        async for m in tg.iter_messages(dialog, limit=100, offset_date=now_utc):
+            if m.date and m.date >= start_utc and m.text:
+                messages.append(m)
+            elif m.date and m.date < start_utc:
+                break
+        return messages
+
+
+async def call_anthropic(ai_client, model, max_tokens, messages, thinking=False):
+    loop = asyncio.get_event_loop()
+    kwargs = dict(model=model, max_tokens=max_tokens, messages=messages)
+    if thinking:
+        kwargs["thinking"] = {"type": "adaptive"}
+
+    for attempt in range(3):
+        try:
+            def _call():
+                with ai_client.messages.stream(**kwargs) as stream:
+                    return stream.get_final_message()
+            return await loop.run_in_executor(None, _call)
+        except Exception as e:
+            if attempt < 2:
+                await asyncio.sleep(3)
+            else:
+                raise
+
+
+async def is_financial_channel(ai_client, channel_name, sample_text, sem):
+    async with sem:
+        prompt = f"""Channel name: "{channel_name}"
 Sample messages:
 {sample_text[:600]}
 
-Does this channel contain ANY financial, market, economic, geopolitical, crypto, stocks, commodities, macro, or business news that could be relevant to investors or traders? When in doubt, answer YES. Only answer NO if the channel is clearly about non-financial topics like entertainment, sports, personal lifestyle, or university events. Answer only YES or NO."""
+Does this channel contain ANY financial, market, economic, geopolitical, crypto, stocks, commodities, macro, or business news relevant to investors or traders? When in doubt, answer YES. Only answer NO if clearly non-financial (entertainment, sports, personal lifestyle, university events). Answer only YES or NO."""
+        try:
+            response = await call_anthropic(
+                ai_client, "claude-haiku-4-5", 5,
+                [{"role": "user", "content": prompt}]
+            )
+            return response.content[0].text.strip().upper().startswith("YES")
+        except:
+            return True  # default to include on error
 
-    response = client_ai.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=5,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.content[0].text.strip().upper().startswith("YES")
 
-
-def analyze_channel(client_ai, channel_name, messages_text):
-    prompt = f"""You are a financial analyst. Extract all market-relevant information from these Telegram messages (channel: "{channel_name}").
+async def analyze_channel(ai_client, channel_name, messages_text, sem):
+    async with sem:
+        prompt = f"""You are a financial analyst. Extract all market-relevant information from these Telegram messages (channel: "{channel_name}").
 
 MESSAGES:
 {messages_text}
@@ -59,93 +92,94 @@ Return a structured extract with:
 
 1. **Assets mentioned** (list every asset, ticker, or market covered — be specific: "AAPL", "BTC", "KOSPI", "Gold", "Crude Oil", etc.)
 
-2. **News items** (one bullet per distinct development — include ALL of them, nothing omitted):
-   Format each as: [ASSET] — [what happened] — [key figure/number if any]
+2. **News items** (one bullet per distinct development — include ALL of them):
+   Format: [ASSET] — [what happened] — [key figure/number if any]
 
-3. **Divergence alerts** (only where news meaningfully contradicts the asset's known fundamentals):
+3. **Divergence alerts** (only where news contradicts the asset's known fundamentals):
    [ASSET] | [news] | [what fundamentals say] | [severity: LOW/MEDIUM/HIGH/EXTREME] | [POSITIVE/NEGATIVE]
 
-Be exhaustive on news items. Include every development mentioned, even briefly."""
+Be exhaustive. Include every development mentioned."""
 
-    for attempt in range(3):
         try:
-            # Use Sonnet for per-channel analysis — faster and cheaper
-            with client_ai.messages.stream(
-                model="claude-sonnet-4-6",
-                max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}]
-            ) as stream:
-                return stream.get_final_message()
+            response = await call_anthropic(
+                ai_client, "claude-sonnet-4-6", 2048,
+                [{"role": "user", "content": prompt}]
+            )
+            for block in response.content:
+                if block.type == "text":
+                    return (channel_name, block.text.strip())
         except Exception as e:
-            if attempt < 2:
-                time.sleep(3)
-            else:
-                raise
+            print(f"  [FAILED] {channel_name}: {type(e).__name__}")
+        return None
 
 
-def process_channel(client_ai, channel_name, messages_text):
-    """Wrapper for parallel execution — returns (name, analysis) or None on failure."""
-    try:
-        response = analyze_channel(client_ai, channel_name, messages_text)
-        for block in response.content:
-            if block.type == "text":
-                return (channel_name, block.text.strip())
-    except Exception as e:
-        print(f"  [FAILED] {channel_name}: {type(e).__name__}")
-    return None
+async def process_channel(tg, ai_client, dialog, start_utc, now_utc, tg_sem, api_sem):
+    messages = await fetch_channel_messages(tg, dialog, start_utc, now_utc, tg_sem)
+    if not messages:
+        return None
+
+    messages_text = "\n".join(
+        f"[{m.date.astimezone().strftime('%H:%M')}] {m.text[:500]}"
+        for m in reversed(messages)
+    )
+    sample = "\n".join(m.text[:200] for m in messages[:3])
+
+    if not await is_financial_channel(ai_client, dialog.name, sample, api_sem):
+        print(f"  [SKIP] {dialog.name}")
+        return None
+
+    print(f"  [ANALYZING] {dialog.name} ({len(messages)} messages)")
+    result = await analyze_channel(ai_client, dialog.name, messages_text, api_sem)
+    if result:
+        print(f"  [DONE] {result[0]}")
+    return result
 
 
-def generate_digest(client_ai, channel_analyses, label):
+async def generate_digest(ai_client, channel_analyses, label):
     combined = "\n\n".join(
         f"=== {name} ===\n{analysis}"
         for name, analysis in channel_analyses
     )
 
-    prompt = f"""You are a senior financial analyst. Below are raw analyses from multiple financial Telegram channels covering the time window: {label}.
+    prompt = f"""You are a senior financial analyst. Aggregate these channel analyses into a unified digest for: {label}.
 
 {combined}
 
-Your job is to AGGREGATE this into a unified digest — NOT a channel-by-channel report. Multiple channels often cover the same story; merge and deduplicate them into single entries. Prioritize depth over breadth.
+Sections:
 
-Produce the digest in these sections:
-
-1. **Top Stories** (5-8 biggest developments, aggregated across all sources. Each story should consolidate everything multiple channels said about it. Include specific numbers, prices, percentages. Format:
+1. **Top Stories** (5-8 biggest developments, aggregated across sources, with specific numbers/prices):
    ### [Story Title]
-   [Full aggregated summary — 3-6 sentences combining all angles covered])
+   [3-6 sentence aggregated summary]
 
-2. **Asset-by-Asset Breakdown** (group ALL news by asset, not by channel. Deduplicate — if 3 channels covered the same story, write it once. Include every asset that had any news. Format:
-   ### [Asset Name]
-   - [development 1]
-   - [development 2]
-   ...)
+2. **Asset-by-Asset Breakdown** (group by asset, deduplicate, every asset with news):
+   ### [Asset]
+   - [development]
 
-3. **Divergence Watchlist** (HIGH and EXTREME only, ranked by severity):
-   Asset | What happened | What fundamentals say | Severity | Direction
+3. **Divergence Watchlist** (HIGH and EXTREME only):
+   Asset | What happened | Fundamentals say | Severity | Direction
 
-4. **Market Sentiment** (1 paragraph — overall tone and key drivers)
+4. **Market Sentiment** (1 paragraph)
 
-5. **Assets to Watch** (bullet list with one-line reason each)
+5. **Assets to Watch** (bullet + one-line reason)
 
-Rules:
-- Never repeat the same news twice
-- Merge overlapping coverage into the richest single entry
-- Organize by what happened, not who reported it"""
+Rules: Never repeat the same news. Merge overlapping coverage. Organize by what happened, not who reported it."""
 
     print(f"\n{'='*70}")
     print("  GENERATING MASTER DIGEST...")
     print(f"{'='*70}\n")
 
-    # Use Opus for the final digest — best reasoning for aggregation
-    with client_ai.messages.stream(
-        model="claude-opus-4-6",
-        max_tokens=8000,
-        thinking={"type": "adaptive"},
-        messages=[{"role": "user", "content": prompt}]
-    ) as stream:
-        return stream.get_final_message()
+    response = await call_anthropic(
+        ai_client, "claude-opus-4-6", 8000,
+        [{"role": "user", "content": prompt}],
+        thinking=True
+    )
+    for block in response.content:
+        if block.type == "text":
+            return block.text.strip()
+    return ""
 
 
-def send_to_telegram(tg, label, digest_text):
+def send_to_telegram_sync(tg, label, digest_text):
     header = f"📊 NEWS DIGEST | {label}\n{'='*40}\n\n"
     full_text = header + digest_text
     chunk_size = 4000
@@ -163,21 +197,22 @@ def send_to_telegram(tg, label, digest_text):
     for i, chunk in enumerate(chunks):
         if len(chunks) > 1:
             chunk = f"[{i+1}/{len(chunks)}]\n\n" + chunk
-        tg.send_message("me", chunk)
+        tg.loop.run_until_complete(tg.send_message("me", chunk))
         time.sleep(0.5)
 
-    print(f"  Sent {len(chunks)} message(s) to Telegram Saved Messages.")
+    print(f"  Sent {len(chunks)} message(s) to Telegram.")
 
 
-def main():
+async def main():
     ai_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     session = StringSession(TELEGRAM_SESSION) if len(TELEGRAM_SESSION) > 20 else TELEGRAM_SESSION
     tg = TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH)
-    tg.connect()
-    if not tg.is_user_authorized():
-        tg.disconnect()
-        raise Exception("Not authorized. Please run auth separately first.")
+    await tg.connect()
+
+    if not await tg.is_user_authorized():
+        await tg.disconnect()
+        raise Exception("Not authorized.")
 
     try:
         start_utc, label = get_time_window()
@@ -187,71 +222,56 @@ def main():
         print(f"  TELEGRAM NEWS ANALYSIS  |  Window: {label}")
         print(f"{'='*70}\n")
 
-        dialogs = tg.get_dialogs()
+        dialogs = await tg.get_dialogs()
         channels = [d for d in dialogs if isinstance(d.entity, Channel) and not d.entity.megagroup]
+        print(f"Found {len(channels)} channels. Processing concurrently...\n")
 
-        print(f"Found {len(channels)} channels. Fetching messages...\n")
+        tg_sem = asyncio.Semaphore(TG_SEMAPHORE)
+        api_sem = asyncio.Semaphore(API_SEMAPHORE)
 
-        # Collect all channel messages first (Telegram is sequential)
-        raw_channels = []
-        for dialog in channels:
-            messages = [
-                m for m in tg.iter_messages(dialog, limit=200, offset_date=now_utc)
-                if m.date and m.date >= start_utc and m.text
-            ]
-            if not messages:
-                continue
-            messages_text = "\n".join(
-                f"[{m.date.astimezone().strftime('%H:%M')}] {m.text[:500]}"
-                for m in reversed(messages)
-            )
-            sample = "\n".join(m.text[:200] for m in messages[:3])
-            raw_channels.append((dialog.name, messages_text, sample))
+        tasks = [
+            process_channel(tg, ai_client, dialog, start_utc, now_utc, tg_sem, api_sem)
+            for dialog in channels
+        ]
+        results = await asyncio.gather(*tasks)
+        channel_analyses = [r for r in results if r]
 
-        print(f"  {len(raw_channels)} channels with messages. Filtering + analyzing in parallel...\n")
+        print(f"\n  Analyzed {len(channel_analyses)} financial channels.")
 
-        def filter_and_analyze(args):
-            name, messages_text, sample = args
-            if not is_financial_channel(ai_client, name, sample):
-                print(f"  [SKIP] {name}")
-                return None
-            print(f"  [ANALYZING] {name}")
-            return process_channel(ai_client, name, messages_text)
-
-        # Filter + analyze all channels in parallel
-        channel_analyses = []
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(filter_and_analyze, args): args[0]
-                for args in raw_channels
-            }
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    channel_analyses.append(result)
-                    print(f"  [DONE] {result[0]}")
-
-        # Master digest using Opus
-        digest_text = ""
         if channel_analyses:
-            digest = generate_digest(ai_client, channel_analyses, label)
-            for block in digest.content:
-                if block.type == "text":
-                    digest_text = block.text.strip()
-                    for line in digest_text.split("\n"):
-                        print(f"  {line}")
+            digest_text = await generate_digest(ai_client, channel_analyses, label)
+
+            for line in digest_text.split("\n"):
+                print(f"  {line}")
 
             if digest_text:
-                print("\n  Sending digest to Telegram...")
-                send_to_telegram(tg, label, digest_text)
+                print("\n  Sending to Telegram...")
+                header = f"📊 NEWS DIGEST | {label}\n{'='*40}\n\n"
+                full_text = header + digest_text
+                chunk_size = 4000
+                chunks = []
+                while len(full_text) > chunk_size:
+                    split_at = full_text.rfind("\n", 0, chunk_size)
+                    if split_at == -1:
+                        split_at = chunk_size
+                    chunks.append(full_text[:split_at])
+                    full_text = full_text[split_at:].lstrip("\n")
+                if full_text:
+                    chunks.append(full_text)
+                for i, chunk in enumerate(chunks):
+                    if len(chunks) > 1:
+                        chunk = f"[{i+1}/{len(chunks)}]\n\n" + chunk
+                    await tg.send_message("me", chunk)
+                    await asyncio.sleep(0.5)
+                print(f"  Sent {len(chunks)} message(s).")
 
         print(f"\n{'='*70}")
         print("  Done.")
         print(f"{'='*70}\n")
 
     finally:
-        tg.disconnect()
+        await tg.disconnect()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

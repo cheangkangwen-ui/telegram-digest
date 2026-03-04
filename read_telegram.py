@@ -70,16 +70,22 @@ async def main():
 
         dialogs = await tg.get_dialogs()
         channels = [d for d in dialogs if isinstance(d.entity, Channel) and not d.entity.megagroup]
-        print(f"Fetching messages from {len(channels)} channels concurrently...\n")
 
-        # Fetch all channels concurrently
+        # Pre-filter: only fetch channels that posted within the time window
+        # dialog.message.date gives last message time without any extra API call
+        active_channels = [
+            d for d in channels
+            if d.message and d.message.date and d.message.date >= start_utc
+        ]
+        print(f"{len(channels)} channels total, {len(active_channels)} posted in window. Fetching...\n")
+
         tg_sem = asyncio.Semaphore(TG_SEMAPHORE)
-        tasks = [fetch_channel(tg, d, start_utc, now_utc, tg_sem) for d in channels]
+        tasks = [fetch_channel(tg, d, start_utc, now_utc, tg_sem) for d in active_channels]
         results = await asyncio.gather(*tasks)
 
         # Build one big raw message dump grouped by channel
         all_messages = []
-        for dialog, messages in zip(channels, results):
+        for dialog, messages in zip(active_channels, results):
             if not messages:
                 continue
             channel_block = f"### {dialog.name}\n" + "\n".join(

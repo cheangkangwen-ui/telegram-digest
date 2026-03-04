@@ -1,7 +1,12 @@
 import os
+import sys
 import time
 import asyncio
 import anthropic
+
+# Fix Unicode printing on Windows
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel

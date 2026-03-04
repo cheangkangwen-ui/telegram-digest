@@ -25,7 +25,7 @@ def get_time_window():
     now = datetime.now(myt)
     hour = now.hour
 
-    if 8 < hour < 22:
+    if 8 < hour <= 22:
         start = now - timedelta(hours=1)
         label = f"Last 1 hour ({start.strftime('%H:%M')} - {now.strftime('%H:%M')} MYT)"
     else:

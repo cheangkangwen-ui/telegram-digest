@@ -61,6 +61,13 @@ async def main():
         raise Exception("Not authorized.")
 
     try:
+        # Duplicate guard: skip if digest already sent in last 50 minutes
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=50)
+        async for msg in tg.iter_messages("me", limit=5):
+            if msg.date and msg.date >= cutoff and msg.text and "NEWS DIGEST" in msg.text:
+                print("Digest already sent in last 50 minutes. Skipping.")
+                return
+
         start_utc, label = get_time_window()
         now_utc = datetime.now(timezone.utc)
 

@@ -17,18 +17,19 @@ MAX_WORKERS = 8  # parallel channel analyses
 
 
 def get_time_window():
-    now = datetime.now()
+    myt = timezone(timedelta(hours=8))
+    now = datetime.now(myt)
     hour = now.hour
 
     if 8 < hour < 22:
         start = now - timedelta(hours=1)
-        label = f"Last 1 hour ({start.strftime('%H:%M')} - {now.strftime('%H:%M')})"
+        label = f"Last 1 hour ({start.strftime('%H:%M')} - {now.strftime('%H:%M')} MYT)"
     else:
         overnight_start = now.replace(hour=22, minute=0, second=0, microsecond=0)
         if hour <= 8:
             overnight_start -= timedelta(days=1)
         start = overnight_start
-        label = f"Overnight ({start.strftime('%Y-%m-%d %H:%M')} - {now.strftime('%H:%M')})"
+        label = f"Overnight ({start.strftime('%Y-%m-%d %H:%M')} - {now.strftime('%H:%M')} MYT)"
 
     return start.astimezone(timezone.utc), label
 

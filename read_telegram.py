@@ -38,7 +38,7 @@ def is_financial_channel(client_ai, channel_name, sample_text):
 Sample messages:
 {sample_text[:600]}
 
-Is this channel primarily about finance, markets, investing, economics, crypto, stocks, commodities, or macro news? Answer only YES or NO."""
+Does this channel contain ANY financial, market, economic, geopolitical, crypto, stocks, commodities, macro, or business news that could be relevant to investors or traders? When in doubt, answer YES. Only answer NO if the channel is clearly about non-financial topics like entertainment, sports, personal lifestyle, or university events. Answer only YES or NO."""
 
     response = client_ai.messages.create(
         model="claude-haiku-4-5",

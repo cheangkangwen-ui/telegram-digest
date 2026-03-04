@@ -1,6 +1,7 @@
 import os
 import time
 import anthropic
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel
@@ -12,19 +13,20 @@ TELEGRAM_SESSION = os.environ.get("TELEGRAM_SESSION", "my_session")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
+MAX_WORKERS = 8  # parallel channel analyses
+
 
 def get_time_window():
     now = datetime.now()
     hour = now.hour
 
-    if 8 <= hour < 22:
+    if 8 < hour < 22:
         start = now - timedelta(hours=1)
         label = f"Last 1 hour ({start.strftime('%H:%M')} - {now.strftime('%H:%M')})"
     else:
-        if hour < 8:
-            overnight_start = now.replace(hour=22, minute=0, second=0, microsecond=0) - timedelta(days=1)
-        else:
-            overnight_start = now.replace(hour=22, minute=0, second=0, microsecond=0)
+        overnight_start = now.replace(hour=22, minute=0, second=0, microsecond=0)
+        if hour <= 8:
+            overnight_start -= timedelta(days=1)
         start = overnight_start
         label = f"Overnight ({start.strftime('%Y-%m-%d %H:%M')} - {now.strftime('%H:%M')})"
 
@@ -32,7 +34,6 @@ def get_time_window():
 
 
 def is_financial_channel(client_ai, channel_name, sample_text):
-    """Use Haiku to quickly check if channel is finance/market related."""
     prompt = f"""Channel name: "{channel_name}"
 Sample messages:
 {sample_text[:600]}
@@ -44,8 +45,7 @@ Is this channel primarily about finance, markets, investing, economics, crypto, 
         max_tokens=5,
         messages=[{"role": "user", "content": prompt}]
     )
-    answer = response.content[0].text.strip().upper()
-    return answer.startswith("YES")
+    return response.content[0].text.strip().upper().startswith("YES")
 
 
 def analyze_channel(client_ai, channel_name, messages_text):
@@ -68,19 +68,30 @@ Be exhaustive on news items. Include every development mentioned, even briefly."
 
     for attempt in range(3):
         try:
+            # Use Sonnet for per-channel analysis — faster and cheaper
             with client_ai.messages.stream(
-                model="claude-opus-4-6",
+                model="claude-sonnet-4-6",
                 max_tokens=2048,
-                thinking={"type": "adaptive"},
                 messages=[{"role": "user", "content": prompt}]
             ) as stream:
                 return stream.get_final_message()
         except Exception as e:
             if attempt < 2:
-                print(f"  Retrying ({attempt+1}/3)... ({type(e).__name__})")
                 time.sleep(3)
             else:
                 raise
+
+
+def process_channel(client_ai, channel_name, messages_text):
+    """Wrapper for parallel execution — returns (name, analysis) or None on failure."""
+    try:
+        response = analyze_channel(client_ai, channel_name, messages_text)
+        for block in response.content:
+            if block.type == "text":
+                return (channel_name, block.text.strip())
+    except Exception as e:
+        print(f"  [FAILED] {channel_name}: {type(e).__name__}")
+    return None
 
 
 def generate_digest(client_ai, channel_analyses, label):
@@ -123,6 +134,7 @@ Rules:
     print("  GENERATING MASTER DIGEST...")
     print(f"{'='*70}\n")
 
+    # Use Opus for the final digest — best reasoning for aggregation
     with client_ai.messages.stream(
         model="claude-opus-4-6",
         max_tokens=8000,
@@ -133,7 +145,6 @@ Rules:
 
 
 def send_to_telegram(tg, label, digest_text):
-    """Split and send digest in chunks (Telegram 4096 char limit)."""
     header = f"📊 NEWS DIGEST | {label}\n{'='*40}\n\n"
     full_text = header + digest_text
     chunk_size = 4000
@@ -180,54 +191,48 @@ def main():
 
         print(f"Found {len(channels)} channels. Fetching messages...\n")
 
-        channel_analyses = []
-        skipped_non_financial = 0
+        # Collect all channel messages first
+        channel_queue = []
+        skipped = 0
 
         for dialog in channels:
             messages = [
                 m for m in tg.iter_messages(dialog, limit=200, offset_date=now_utc)
                 if m.date and m.date >= start_utc and m.text
             ]
-
             if not messages:
                 continue
 
-            # Quick financial relevance check using Haiku
             sample = "\n".join(m.text[:200] for m in messages[:3])
             if not is_financial_channel(ai_client, dialog.name, sample):
-                print(f"  [SKIP] {dialog.name} — not financial")
-                skipped_non_financial += 1
+                print(f"  [SKIP] {dialog.name}")
+                skipped += 1
                 continue
-
-            print(f"\n{'-'*70}")
-            print(f"  {dialog.name}  ({len(messages)} messages)")
-            print(f"{'-'*70}")
 
             messages_text = "\n".join(
                 f"[{m.date.astimezone().strftime('%H:%M')}] {m.text[:500]}"
                 for m in reversed(messages)
             )
+            channel_queue.append((dialog.name, messages_text))
+            print(f"  [QUEUED] {dialog.name} ({len(messages)} messages)")
 
-            print("  Analyzing with Claude...")
-            try:
-                response = analyze_channel(ai_client, dialog.name, messages_text)
-            except Exception as e:
-                print(f"  Skipping — failed after retries: {type(e).__name__}")
-                continue
+        print(f"\n  Skipped {skipped} non-financial channels.")
+        print(f"  Analyzing {len(channel_queue)} channels in parallel ({MAX_WORKERS} workers)...\n")
 
-            analysis_text = ""
-            for block in response.content:
-                if block.type == "text":
-                    analysis_text = block.text.strip()
-                    for line in analysis_text.split("\n"):
-                        print(f"  {line}")
+        # Analyze all channels in parallel
+        channel_analyses = []
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(process_channel, ai_client, name, text): name
+                for name, text in channel_queue
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    channel_analyses.append(result)
+                    print(f"  [DONE] {result[0]}")
 
-            if analysis_text:
-                channel_analyses.append((dialog.name, analysis_text))
-
-        print(f"\n  Skipped {skipped_non_financial} non-financial channels.")
-
-        # Master digest
+        # Master digest using Opus
         digest_text = ""
         if channel_analyses:
             digest = generate_digest(ai_client, channel_analyses, label)

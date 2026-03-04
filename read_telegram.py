@@ -67,7 +67,7 @@ async def main():
 
     try:
         # Duplicate guard: skip if digest already sent in last 50 minutes
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=20)
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=40)
         async for msg in tg.iter_messages("me", limit=5):
             if msg.date and msg.date >= cutoff and msg.text and "NEWS DIGEST" in msg.text:
                 print("Digest already sent in last 50 minutes. Skipping.")

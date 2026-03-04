@@ -12,7 +12,7 @@ TELEGRAM_API_HASH = "dd0a935bd6545cf56910292ff4445c4e"
 TELEGRAM_SESSION = os.environ.get("TELEGRAM_SESSION", "my_session")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
-TG_SEMAPHORE = 15
+TG_SEMAPHORE = 30
 
 
 def get_time_window():
@@ -33,11 +33,11 @@ def get_time_window():
     return start.astimezone(timezone.utc), label
 
 
-async def fetch_channel(tg, dialog, start_utc, now_utc, sem):
+async def fetch_channel(tg, dialog, start_utc, now_utc, sem, msg_limit=10):
     async with sem:
         messages = []
         try:
-            async for m in tg.iter_messages(dialog, limit=100, offset_date=now_utc):
+            async for m in tg.iter_messages(dialog, limit=msg_limit, offset_date=now_utc):
                 if m.date and m.date >= start_utc and m.text:
                     messages.append(m)
                 elif m.date and m.date < start_utc:
@@ -72,7 +72,10 @@ async def main():
 
         # Fetch all channels concurrently
         tg_sem = asyncio.Semaphore(TG_SEMAPHORE)
-        tasks = [fetch_channel(tg, d, start_utc, now_utc, tg_sem) for d in channels]
+        # Hourly: max 10 messages per channel; overnight: max 50
+        is_overnight = "Overnight" in label
+        msg_limit = 50 if is_overnight else 10
+        tasks = [fetch_channel(tg, d, start_utc, now_utc, tg_sem, msg_limit) for d in channels]
         results = await asyncio.gather(*tasks)
 
         # Build one big raw message dump grouped by channel

@@ -13,7 +13,7 @@ TELEGRAM_SESSION = os.environ.get("TELEGRAM_SESSION", "my_session")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
-MAX_WORKERS = 8  # parallel channel analyses
+MAX_WORKERS = 20  # parallel channel analyses
 
 
 def get_time_window():
@@ -192,10 +192,8 @@ def main():
 
         print(f"Found {len(channels)} channels. Fetching messages...\n")
 
-        # Collect all channel messages first
-        channel_queue = []
-        skipped = 0
-
+        # Collect all channel messages first (Telegram is sequential)
+        raw_channels = []
         for dialog in channels:
             messages = [
                 m for m in tg.iter_messages(dialog, limit=200, offset_date=now_utc)
@@ -203,29 +201,29 @@ def main():
             ]
             if not messages:
                 continue
-
-            sample = "\n".join(m.text[:200] for m in messages[:3])
-            if not is_financial_channel(ai_client, dialog.name, sample):
-                print(f"  [SKIP] {dialog.name}")
-                skipped += 1
-                continue
-
             messages_text = "\n".join(
                 f"[{m.date.astimezone().strftime('%H:%M')}] {m.text[:500]}"
                 for m in reversed(messages)
             )
-            channel_queue.append((dialog.name, messages_text))
-            print(f"  [QUEUED] {dialog.name} ({len(messages)} messages)")
+            sample = "\n".join(m.text[:200] for m in messages[:3])
+            raw_channels.append((dialog.name, messages_text, sample))
 
-        print(f"\n  Skipped {skipped} non-financial channels.")
-        print(f"  Analyzing {len(channel_queue)} channels in parallel ({MAX_WORKERS} workers)...\n")
+        print(f"  {len(raw_channels)} channels with messages. Filtering + analyzing in parallel...\n")
 
-        # Analyze all channels in parallel
+        def filter_and_analyze(args):
+            name, messages_text, sample = args
+            if not is_financial_channel(ai_client, name, sample):
+                print(f"  [SKIP] {name}")
+                return None
+            print(f"  [ANALYZING] {name}")
+            return process_channel(ai_client, name, messages_text)
+
+        # Filter + analyze all channels in parallel
         channel_analyses = []
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {
-                executor.submit(process_channel, ai_client, name, text): name
-                for name, text in channel_queue
+                executor.submit(filter_and_analyze, args): args[0]
+                for args in raw_channels
             }
             for future in as_completed(futures):
                 result = future.result()

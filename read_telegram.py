@@ -77,9 +77,10 @@ async def main():
         # Check when the last digest was actually sent; if gap > 70 min, use that as window start
         now_utc = datetime.now(timezone.utc)
         last_digest_time = None
-        async for msg in tg.iter_messages("me", limit=1):
+        async for msg in tg.iter_messages("me", limit=10):
             if msg.date and msg.text and "NEWS DIGEST" in msg.text:
                 last_digest_time = msg.date
+                break
 
         if last_digest_time and (now_utc - last_digest_time) > timedelta(minutes=70):
             start_utc = last_digest_time

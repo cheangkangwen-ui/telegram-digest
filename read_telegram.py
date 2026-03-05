@@ -198,6 +198,16 @@ RAW MESSAGES:
                 await asyncio.sleep(0.5)
             print(f"  Sent {len(chunks)} message(s).")
 
+            # Notify Cloudflare Worker so it knows a digest was sent
+            try:
+                import urllib.request
+                urllib.request.urlopen(urllib.request.Request(
+                    "https://telegram-digest-scheduler.cheangkangwen.workers.dev/notify",
+                    method="POST"
+                ), timeout=5)
+            except Exception:
+                pass
+
         print(f"\n{'='*70}")
         print("  Done.")
         print(f"{'='*70}\n")

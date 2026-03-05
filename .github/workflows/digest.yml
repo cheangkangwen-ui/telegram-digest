@@ -2,10 +2,8 @@ name: Telegram News Digest
 
 on:
   schedule:
-    # 8am MYT (UTC+8) = 0:05 UTC — overnight digest (10pm-8am)
-    - cron: '5 0 * * *'
-    # 9am-10pm MYT hourly = 1:05-14:05 UTC
-    - cron: '5 1-14 * * *'
+    # Every 5 min, 8am-10pm MYT (0:00-14:59 UTC) — retries until sent
+    - cron: '*/5 0-14 * * *'
   workflow_dispatch:  # Allow manual trigger from GitHub UI
 
 jobs:

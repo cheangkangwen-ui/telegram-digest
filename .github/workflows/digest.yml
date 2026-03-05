@@ -25,5 +25,5 @@ jobs:
       - name: Run digest
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
+          TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION_GHA }}
         run: python read_telegram.py

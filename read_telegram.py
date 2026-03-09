@@ -66,16 +66,12 @@ async def main():
         raise Exception("Not authorized.")
 
     try:
-        # Duplicate guard: skip if digest already sent recently
-        # Weekends (MYT): 12-hour dedup; weekdays: 58-minute dedup
+        # Duplicate guard: skip if digest already sent in last 5 minutes (blocks near-simultaneous runs)
         if not os.environ.get("SKIP_DUPLICATE_CHECK"):
-            myt = timezone(timedelta(hours=8))
-            is_weekend = datetime.now(myt).weekday() >= 5
-            dedup_minutes = 720 if is_weekend else 58
-            cutoff = datetime.now(timezone.utc) - timedelta(minutes=dedup_minutes)
-            async for msg in tg.iter_messages("me", limit=5):
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+            async for msg in tg.iter_messages("me", limit=3):
                 if msg.date and msg.date >= cutoff and msg.text and "NEWS DIGEST" in msg.text:
-                    print(f"Digest already sent in last {dedup_minutes} minutes. Skipping.")
+                    print("Digest already sent in last 5 minutes. Skipping.")
                     return
 
         # Check when the last digest was actually sent; if gap > 70 min, use that as window start

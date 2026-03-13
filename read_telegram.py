@@ -128,28 +128,61 @@ async def main():
         raw_dump = "\n\n".join(all_messages)
 
         # Single Opus call to do everything at once
-        prompt = f"""You are a senior financial analyst. Below are raw messages from {len(all_messages)} Telegram channels over the time window: {label}.
+        prompt = f"""You are a senior financial analyst. Below are raw messages from {len(all_messages)} Telegram channels over {label}.
 
-First, ignore any channels that are clearly non-financial (entertainment, sports, lifestyle, university events).
+Ignore channels that are clearly non-financial (entertainment, sports, lifestyle).
 
-For the remaining financial channels, produce a MASTER DIGEST:
+Produce a digest with exactly 4 sections:
 
-1. **Top Stories** (5-8 biggest developments aggregated across all sources, with specific numbers/prices):
-   ### [Story Title]
-   [3-6 sentence summary combining all angles]
+**1. Top Stories**
+- [bullet] most impactful development (with specific numbers/prices where available)
+- [bullet] ...
+(5-8 bullets, deduplicated across all channels, most impactful first)
 
-2. **Asset-by-Asset Breakdown** (group ALL news by asset, deduplicate across channels):
-   ### [Asset]
-   - [development]
+Then write a concise 3-5 sentence paragraph summarising the key themes and what they mean for markets.
 
-3. **Divergence Watchlist** (HIGH and EXTREME only — news that contradicts asset fundamentals):
-   Asset | What happened | What fundamentals say | Severity | Direction
+**2. Market Sentiment**
+One paragraph — is the market risk-on, risk-off, or mixed? Explain why based on the news above.
 
-4. **Market Sentiment** (1 paragraph — risk-on/off/mixed and why)
+**3. Macro Asset Reactions**
+For each asset below, state how it has reacted or is likely to react based on the news. Include specific price moves if mentioned.
 
-5. **Assets to Watch** (bullet + one-line reason each)
+**US & Global**
+- S&P 500 Futures (ES): [direction/move] — [reason]
+- Nasdaq Futures (NQ): [direction/move] — [reason]
+- Gold (spot): [direction/move] — [reason]
+- Oil (WTI / Brent): [direction/move] — [reason]
+- Bitcoin (BTC): [direction/move] — [reason]
+- DXY (USD Index): [direction/move] — [reason]
+- US 10Y Yield: [direction/move] — [reason]
 
-Rules: Never repeat the same news twice. Merge overlapping coverage. Organize by what happened, not by channel.
+**EM Asia Equities**
+- HSI (Hong Kong): [direction/move] — [reason]
+- CSI 300 (China): [direction/move] — [reason]
+- Shanghai Composite: [direction/move] — [reason]
+- Nikkei 225 (Japan): [direction/move] — [reason]
+- KOSPI (South Korea): [direction/move] — [reason]
+- STI (Singapore): [direction/move] — [reason]
+- KLCI (Malaysia): [direction/move] — [reason]
+
+**EM Asia Yields**
+- China 10Y: [direction/move] — [reason]
+- India 10Y: [direction/move] — [reason]
+
+If there is no relevant news for an asset, write "No significant news this window."
+
+**4. Narrative Sustainability**
+Debate yourself. Based on today's dominant market narrative, answer: is this narrative sustainable?
+
+Structure it as:
+- **The narrative**: State the current prevailing market narrative in 1-2 sentences.
+- **Why it holds (Bull case)**: Key drivers and first principles supporting it continuing.
+- **Why it breaks (Bear case)**: What fundamentals, contradictions, or risks undermine it. Be intellectually honest — steelman the opposing view.
+- **Verdict**: Is the narrative sustainable? If yes, what would change that? If no, when might it crack and to what extent (magnitude of reversal, assets most affected)?
+
+Be rigorous. Do not hedge everything. Take a position.
+
+Rules: Never repeat the same news twice. Merge overlapping coverage across channels.
 
 RAW MESSAGES:
 {raw_dump}"""

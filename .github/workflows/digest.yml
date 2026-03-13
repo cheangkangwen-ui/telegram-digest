@@ -2,8 +2,8 @@ name: Telegram News Digest
 
 on:
   schedule:
-    # Every 5 min, 8am-10pm MYT (0:00-14:59 UTC) — retries until sent
-    - cron: '*/5 0-14 * * *'
+    # Every 3 hours: 8am, 11am, 2pm, 5pm, 8pm, 11pm MYT (UTC+8) = 0,3,6,9,12,15 UTC
+    - cron: '0 0,3,6,9,12,15 * * *'
   workflow_dispatch:  # Allow manual trigger from GitHub UI
 
 jobs:
@@ -24,4 +24,5 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION_GHA }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: python read_telegram.py

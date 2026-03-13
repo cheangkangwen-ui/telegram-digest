@@ -19,22 +19,41 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 TG_SEMAPHORE = 30
 
+SEARCH_TOOL = {
+    "name": "web_search",
+    "description": (
+        "Search the web for current news, market data, or financial information. "
+        "Use this when you need real-time facts to ground the Narrative Sustainability debate."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "The search query"}
+        },
+        "required": ["query"],
+    },
+}
+
+
+def web_search(query: str, max_results: int = 6) -> str:
+    from duckduckgo_search import DDGS
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        if not results:
+            return "No results found."
+        return "\n\n".join(
+            f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results
+        )
+    except Exception as e:
+        return f"Search failed: {e}"
+
 
 def get_time_window():
     myt = timezone(timedelta(hours=8))
     now = datetime.now(myt)
-    hour = now.hour
-
-    if 9 <= hour <= 22:
-        start = now - timedelta(hours=1)
-        label = f"Last 1 hour ({start.strftime('%H:%M')} - {now.strftime('%H:%M')} MYT)"
-    else:
-        overnight_start = now.replace(hour=22, minute=0, second=0, microsecond=0)
-        if hour <= 8:
-            overnight_start -= timedelta(days=1)
-        start = overnight_start
-        label = f"Overnight ({start.strftime('%Y-%m-%d %H:%M')} - {now.strftime('%H:%M')} MYT)"
-
+    start = now - timedelta(hours=3)
+    label = f"Last 3 hours ({start.strftime('%H:%M')} - {now.strftime('%H:%M')} MYT)"
     return start.astimezone(timezone.utc), label
 
 
@@ -77,12 +96,18 @@ async def main():
         # Check when the last digest was actually sent; if gap > 70 min, use that as window start
         now_utc = datetime.now(timezone.utc)
         last_digest_time = None
-        async for msg in tg.iter_messages("me", limit=10):
+        async for msg in tg.iter_messages("me", limit=50):
             if msg.date and msg.text and "NEWS DIGEST" in msg.text:
                 last_digest_time = msg.date
                 break
 
-        if last_digest_time and (now_utc - last_digest_time) > timedelta(minutes=70):
+        is_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+
+        if is_manual:
+            # Manual trigger: always last 3 hours regardless of last digest time
+            start_utc, label = get_time_window()
+        elif last_digest_time and (now_utc - last_digest_time) > timedelta(minutes=70):
+            # Scheduled: use since last digest to avoid gaps if a run was missed
             start_utc = last_digest_time
             myt = timezone(timedelta(hours=8))
             label = f"Since last digest ({last_digest_time.astimezone(myt).strftime('%Y-%m-%d %H:%M')} - {now_utc.astimezone(myt).strftime('%H:%M')} MYT)"
@@ -172,6 +197,8 @@ For each asset below, state how it has reacted or is likely to react based on th
 If there is no relevant news for an asset, write "No significant news this window."
 
 **4. Narrative Sustainability**
+Before writing this section, use the web_search tool to look up 2-3 current sources (e.g. latest macro data, recent analyst commentary, breaking news) to ground your debate in real-time facts — not just the Telegram messages above.
+
 Debate yourself. Based on today's dominant market narrative, answer: is this narrative sustainable?
 
 Structure it as:
@@ -192,13 +219,30 @@ RAW MESSAGES:
         loop = asyncio.get_event_loop()
 
         def _call():
-            with ai_client.messages.stream(
-                model="claude-opus-4-6",
-                max_tokens=8000,
-                thinking={"type": "adaptive"},
-                messages=[{"role": "user", "content": prompt}]
-            ) as stream:
-                return stream.get_final_message()
+            messages = [{"role": "user", "content": prompt}]
+            while True:
+                response = ai_client.messages.create(
+                    model="claude-opus-4-6",
+                    max_tokens=8000,
+                    thinking={"type": "adaptive"},
+                    tools=[SEARCH_TOOL],
+                    messages=messages,
+                )
+                if response.stop_reason != "tool_use":
+                    return response
+                # Execute web searches Claude requested
+                tool_results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        print(f"  [web search] {block.input['query']}")
+                        result = web_search(block.input["query"])
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result,
+                        })
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": tool_results})
 
         response = await loop.run_in_executor(None, _call)
 

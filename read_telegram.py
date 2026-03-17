@@ -282,6 +282,9 @@ RAW MESSAGES:
 
         response = await loop.run_in_executor(None, _call)
 
+        u = response.usage
+        print(f"  Tokens — input: {u.input_tokens:,}  output: {u.output_tokens:,}  cache_read: {getattr(u, 'cache_read_input_tokens', 0):,}")
+
         digest_text = ""
         for block in response.content:
             if block.type == "text":

@@ -93,26 +93,25 @@ async def main():
                     print("Digest already sent in last 5 minutes. Skipping.")
                     return
 
-        # Check when the last digest was actually sent; if gap > 70 min, use that as window start
         now_utc = datetime.now(timezone.utc)
-        last_digest_time = None
-        async for msg in tg.iter_messages("me", limit=50):
-            if msg.date and msg.text and "NEWS DIGEST" in msg.text:
-                last_digest_time = msg.date
-                break
-
         is_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        myt = timezone(timedelta(hours=8))
 
         if is_manual:
-            # Manual trigger: always last 3 hours regardless of last digest time
+            # Manual trigger: always last 3 hours
             start_utc, label = get_time_window()
-        elif last_digest_time and (now_utc - last_digest_time) > timedelta(minutes=70):
-            # Scheduled: use since last digest to avoid gaps if a run was missed
-            start_utc = last_digest_time
-            myt = timezone(timedelta(hours=8))
-            label = f"Since last digest ({last_digest_time.astimezone(myt).strftime('%Y-%m-%d %H:%M')} - {now_utc.astimezone(myt).strftime('%H:%M')} MYT)"
         else:
-            start_utc, label = get_time_window()
+            # Scheduled: compute the previous scheduled run time from the clock (0,3,6,9,12,15 UTC)
+            scheduled_hours = [0, 3, 6, 9, 12, 15]
+            current_hour = now_utc.hour
+            prev_hours = [h for h in scheduled_hours if h < current_hour]
+            if prev_hours:
+                prev_run_utc = now_utc.replace(hour=max(prev_hours), minute=0, second=0, microsecond=0)
+            else:
+                # Current hour is before first scheduled run of the day (e.g. 00:xx UTC) — use yesterday's last run at 15:00 UTC
+                prev_run_utc = (now_utc - timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
+            start_utc = prev_run_utc
+            label = f"{prev_run_utc.astimezone(myt).strftime('%H:%M')} - {now_utc.astimezone(myt).strftime('%H:%M')} MYT"
 
         print(f"\n{'='*70}")
         print(f"  TELEGRAM NEWS ANALYSIS  |  Window: {label}")

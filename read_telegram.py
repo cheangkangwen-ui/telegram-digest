@@ -10,12 +10,14 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel
+from telethon.tl.functions.channels import CreateChannelRequest
 from datetime import datetime, timezone, timedelta
 
 TELEGRAM_API_ID = 33919151
 TELEGRAM_API_HASH = "dd0a935bd6545cf56910292ff4445c4e"
 TELEGRAM_SESSION = os.environ.get("TELEGRAM_SESSION", "my_session")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+DIGEST_GROUP_NAME = os.environ.get("DIGEST_GROUP_NAME", "📊 News Digest")
 
 TG_SEMAPHORE = 30
 
@@ -73,6 +75,20 @@ async def fetch_channel(tg, dialog, start_utc, now_utc, sem):
         return messages
 
 
+async def get_or_create_digest_group(tg):
+    """Return the digest group entity, creating it if it doesn't exist."""
+    dialogs = await tg.get_dialogs()
+    for d in dialogs:
+        if d.name == DIGEST_GROUP_NAME and getattr(d.entity, "megagroup", False):
+            return d.entity
+    result = await tg(CreateChannelRequest(
+        title=DIGEST_GROUP_NAME,
+        about="Automated financial news digests",
+        megagroup=True,
+    ))
+    return result.chats[0]
+
+
 async def main():
     ai_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -85,10 +101,12 @@ async def main():
         raise Exception("Not authorized.")
 
     try:
+        digest_group = await get_or_create_digest_group(tg)
+
         # Duplicate guard: skip if digest already sent in last 5 minutes (blocks near-simultaneous runs)
         if not os.environ.get("SKIP_DUPLICATE_CHECK"):
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
-            async for msg in tg.iter_messages("me", limit=3):
+            async for msg in tg.iter_messages(digest_group, limit=3):
                 if msg.date and msg.date >= cutoff and msg.text and "NEWS DIGEST" in msg.text:
                     print("Digest already sent in last 5 minutes. Skipping.")
                     return
@@ -289,7 +307,7 @@ RAW MESSAGES:
             for i, chunk in enumerate(chunks):
                 if len(chunks) > 1:
                     chunk = f"[{i+1}/{len(chunks)}]\n\n" + chunk
-                await tg.send_message("me", chunk)
+                await tg.send_message(digest_group, chunk)
                 await asyncio.sleep(0.5)
             print(f"  Sent {len(chunks)} message(s).")
 

@@ -293,11 +293,16 @@ RAW MESSAGES:
                 full_text = full_text[split_at:].lstrip("\n")
             if full_text:
                 chunks.append(full_text)
+            first_msg = None
             for i, chunk in enumerate(chunks):
                 if len(chunks) > 1:
                     chunk = f"[{i+1}/{len(chunks)}]\n\n" + chunk
-                await tg.send_message(digest_group, chunk)
+                sent = await tg.send_message(digest_group, chunk)
+                if i == 0:
+                    first_msg = sent
                 await asyncio.sleep(0.5)
+            if first_msg:
+                await tg.pin_message(digest_group, first_msg.id, notify=False)
             print(f"  Sent {len(chunks)} message(s).")
 
             # Notify Cloudflare Worker so it knows a digest was sent

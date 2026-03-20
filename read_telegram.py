@@ -51,13 +51,6 @@ def web_search(query: str, max_results: int = 6) -> str:
         return f"Search failed: {e}"
 
 
-def get_time_window():
-    myt = timezone(timedelta(hours=8))
-    now = datetime.now(myt)
-    start = now - timedelta(hours=3)
-    label = f"Last 3 hours ({start.strftime('%H:%M')} - {now.strftime('%H:%M')} MYT)"
-    return start.astimezone(timezone.utc), label
-
 
 async def fetch_channel(tg, dialog, start_utc, now_utc, sem):
     async with sem:
@@ -112,43 +105,36 @@ async def main():
                     return
 
         now_utc = datetime.now(timezone.utc)
-        is_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
         myt = timezone(timedelta(hours=8))
 
-        if is_manual:
-            # Manual trigger: always last 3 hours
-            start_utc, label = get_time_window()
-        else:
-            # Scheduled: compute the previous scheduled run time from the clock.
-            # Weekdays (Mon–Fri): runs at 0,3,6,9,12,15 UTC
-            # Weekends (Sat–Sun): runs at 0,12 UTC
-            # Mon 0 UTC -> prev = Sun 12 UTC
-            # Sat 0 UTC -> prev = Fri 15 UTC
-            # Sun 0 UTC -> prev = Sat 12 UTC
-            weekday = now_utc.weekday()  # 0=Mon ... 5=Sat, 6=Sun
-            current_hour = now_utc.hour
+        # Always use clock-based window (Worker dispatches via workflow_dispatch,
+        # so GITHUB_EVENT_NAME is never "schedule" — treat all runs the same way)
+        # Weekdays (Mon–Fri): runs at 0,3,6,9,12,15 UTC
+        # Weekends (Sat–Sun): runs at 0,12 UTC
+        weekday = now_utc.weekday()  # 0=Mon ... 5=Sat, 6=Sun
+        current_hour = now_utc.hour
 
-            if weekday in (5, 6):  # Saturday or Sunday
-                day_hours = [0, 12]
-                prev_hours = [h for h in day_hours if h < current_hour]
-                if prev_hours:
-                    prev_run_utc = now_utc.replace(hour=max(prev_hours), minute=0, second=0, microsecond=0)
-                elif weekday == 5:  # Sat 0 UTC -> Fri 15 UTC
-                    prev_run_utc = (now_utc - timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
-                else:  # Sun 0 UTC -> Sat 12 UTC
-                    prev_run_utc = (now_utc - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
-            else:  # Weekday (Mon–Fri)
-                day_hours = [0, 3, 6, 9, 12, 15]
-                prev_hours = [h for h in day_hours if h < current_hour]
-                if prev_hours:
-                    prev_run_utc = now_utc.replace(hour=max(prev_hours), minute=0, second=0, microsecond=0)
-                elif weekday == 0:  # Mon 0 UTC -> Sun 12 UTC
-                    prev_run_utc = (now_utc - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
-                else:  # Tue–Fri 0 UTC -> previous day 15 UTC
-                    prev_run_utc = (now_utc - timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
+        if weekday in (5, 6):  # Saturday or Sunday
+            day_hours = [0, 12]
+            prev_hours = [h for h in day_hours if h < current_hour]
+            if prev_hours:
+                prev_run_utc = now_utc.replace(hour=max(prev_hours), minute=0, second=0, microsecond=0)
+            elif weekday == 5:  # Sat 0 UTC -> Fri 15 UTC
+                prev_run_utc = (now_utc - timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
+            else:  # Sun 0 UTC -> Sat 12 UTC
+                prev_run_utc = (now_utc - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+        else:  # Weekday (Mon–Fri)
+            day_hours = [0, 3, 6, 9, 12, 15]
+            prev_hours = [h for h in day_hours if h < current_hour]
+            if prev_hours:
+                prev_run_utc = now_utc.replace(hour=max(prev_hours), minute=0, second=0, microsecond=0)
+            elif weekday == 0:  # Mon 0 UTC -> Sun 12 UTC
+                prev_run_utc = (now_utc - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+            else:  # Tue–Fri 0 UTC -> previous day 15 UTC
+                prev_run_utc = (now_utc - timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
 
-            start_utc = prev_run_utc
-            label = f"{prev_run_utc.astimezone(myt).strftime('%H:%M')} - {now_utc.astimezone(myt).strftime('%H:%M')} MYT"
+        start_utc = prev_run_utc
+        label = f"{prev_run_utc.astimezone(myt).strftime('%H:%M')} - {now_utc.astimezone(myt).strftime('%H:%M')} MYT"
 
         print(f"\n{'='*70}")
         print(f"  TELEGRAM NEWS ANALYSIS  |  Window: {label}")

@@ -217,7 +217,7 @@ RAW MESSAGES:
             messages = [{"role": "user", "content": prompt}]
             while True:
                 response = ai_client.messages.create(
-                    model="claude-opus-4-6",
+                    model="claude-opus-4-7",
                     max_tokens=4000,
                     thinking={"type": "adaptive"},
                     tools=[SEARCH_TOOL],
